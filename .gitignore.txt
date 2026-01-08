@@ -1,0 +1,36 @@
+# macOS 特有
+.DS_Store
+__MACOSX/
+*.swp
+
+# Xcode / macOS ビルド成果物
+build/
+DerivedData/
+*.xcuserdata
+*.xcworkspace
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/
+*.xcodeproj/xcshareddata/WorkspaceSettings.xcsettings
+
+# Cocoapods
+Pods/
+
+# Carthage
+Carthage/Build/
+
+# Swift Package Manager
+.build/
+
+# ビルドキャッシュ
+*.o
+*.obj
+*.so
+*.dylib
+*.a
+*.lo
+*.la
+
+# その他
+*.log
+*.tmp
+*.user
