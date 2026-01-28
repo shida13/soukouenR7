@@ -11,12 +11,15 @@ android {
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
+        // Java 8 以上の機能（通知ライブラリやDesugaringで使用）を有効化
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
 
     kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
+        // 【修正】toString()だと "VERSION_17" となってしまうため、明示的に "17" を指定
+        jvmTarget = "17"
     }
 
     defaultConfig {
@@ -41,4 +44,9 @@ android {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // Java 8 互換ライブラリを追加
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.3")
 }
