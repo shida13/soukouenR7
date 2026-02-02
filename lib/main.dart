@@ -16,19 +16,18 @@ final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // --- 通知設定 ---
   const AndroidInitializationSettings initializationSettingsAndroid =
       AndroidInitializationSettings('@mipmap/ic_launcher');
 
   const DarwinInitializationSettings initializationSettingsIOS =
       DarwinInitializationSettings(
-        requestAlertPermission: true,
-        requestBadgePermission: true,
-        requestSoundPermission: true,
-        defaultPresentAlert: true,
-        defaultPresentBadge: true,
-        defaultPresentSound: true,
-      );
+    requestAlertPermission: true,
+    requestBadgePermission: true,
+    requestSoundPermission: true,
+    defaultPresentAlert: true,
+    defaultPresentBadge: true,
+    defaultPresentSound: true,
+  );
 
   const InitializationSettings initializationSettings = InitializationSettings(
     android: initializationSettingsAndroid,
@@ -67,7 +66,6 @@ class MyBadgeApp extends StatelessWidget {
   }
 }
 
-// --- Webview画面 ---
 class WebViewPage extends StatefulWidget {
   final String userId;
   const WebViewPage({super.key, required this.userId});
@@ -97,7 +95,6 @@ class _WebViewPageState extends State<WebViewPage> {
   }
 }
 
-// --- スキャナー画面 (メイン) ---
 class BadgeScannerScreen extends StatefulWidget {
   const BadgeScannerScreen({super.key});
 
@@ -112,12 +109,13 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
   final Map<String, DateTime> lastNotificationTimes = {};
   final Duration notificationInterval = const Duration(minutes: 1);
 
-  Map<String, String> teacherNames = {"39965603398": "小村"};
+  Map<String, String> teacherNames = {};
+  Map<String, String> userIcons = {};
 
   @override
   void initState() {
     super.initState();
-    _loadSavedNames();
+    _loadSavedData();
   }
 
   @override
@@ -131,10 +129,9 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
     openAppSettings();
   }
 
-  // --- データ保存・読み込み・削除ロジック ---
+  // --- データ保存・読み込み ---
 
-  // 読み込み
-  Future<void> _loadSavedNames() async {
+  Future<void> _loadSavedData() async {
     final prefs = await SharedPreferences.getInstance();
     final keys = prefs.getKeys();
 
@@ -147,16 +144,30 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
             teacherNames[id] = savedName;
           }
         }
+        if (key.startsWith('custom_icon_')) {
+          String id = key.replaceFirst('custom_icon_', '');
+          String? savedIcon = prefs.getString(key);
+          if (savedIcon != null) {
+            userIcons[id] = savedIcon;
+          }
+        }
       }
     });
   }
 
-  // 保存
   Future<void> _saveName(String id, String newName) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('custom_name_$id', newName);
     setState(() {
       teacherNames[id] = newName;
+    });
+  }
+
+  Future<void> _saveIcon(String id, String url) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('custom_icon_$id', url);
+    setState(() {
+      userIcons[id] = url;
     });
   }
 
@@ -166,17 +177,123 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
 
     setState(() {
       teacherNames.clear();
-      teacherNames = {"39965603398": "小村"};
+      userIcons.clear();
     });
 
     if (mounted) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text("全てのデータをリセットしました")));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("全てのデータをリセットしました")),
+      );
     }
   }
 
-  // 名前編集ダイアログ
+// --- 修正: JavaScriptの取得ロジックを提示いただいたHTMLに合わせて変更 ---
+  Future<void> _fetchEightProfile(String id) async {
+    if (teacherNames.containsKey(id)) {
+      return;
+    }
+
+    final tempController = WebViewController();
+    tempController.setJavaScriptMode(JavaScriptMode.unrestricted);
+
+    tempController.setNavigationDelegate(
+      NavigationDelegate(
+        onPageFinished: (String url) async {
+          // 描画待ち
+          await Future.delayed(const Duration(seconds: 3));
+
+          try {
+            final Object result = await tempController.runJavaScriptReturningResult("""
+              (function() {
+                var title = document.title || "";
+                var imgUrl = "";
+                
+                // 【修正】ご提示いただいた alt="person avatar" を最優先で探す
+                var targetImg = document.querySelector('img[alt="person avatar"]');
+                if (targetImg) {
+                    imgUrl = targetImg.src || "";
+                }
+                
+                // 見つからない場合の予備1: URLに 'profiles' を含む画像を全探索
+                // (クラス名が変わってもURL構造は変わりにくいと推測)
+                if (!imgUrl) {
+                    var imgs = document.getElementsByTagName('img');
+                    for (var i = 0; i < imgs.length; i++) {
+                        if (imgs[i].src && imgs[i].src.includes('/profiles/')) {
+                            imgUrl = imgs[i].src;
+                            break;
+                        }
+                    }
+                }
+
+                // 見つからない場合の予備2: metaタグ
+                if (!imgUrl) {
+                    var metaImg = document.querySelector('meta[property="og:image"]');
+                    if (metaImg) {
+                        imgUrl = metaImg.content || "";
+                    }
+                }
+
+                return title + "|||" + imgUrl;
+              })();
+            """);
+
+            String resultStr = result.toString();
+            if (resultStr.startsWith('"') && resultStr.endsWith('"')) {
+              resultStr = resultStr.substring(1, resultStr.length - 1);
+            }
+            resultStr = resultStr.replaceAll(r'\"', '"').replaceAll(r'\/', '/');
+
+            final parts = resultStr.split('|||');
+            if (parts.length == 2) {
+              String rawTitle = parts[0];
+              String imageUrl = parts[1];
+              String? name;
+
+              if (rawTitle.isNotEmpty) {
+                String cleanedTitle = rawTitle.replaceAll(RegExp(r'名刺アプリ|Eight|プロフィール|｜'), '').trim();
+                
+                if (cleanedTitle.contains('|')) {
+                  name = cleanedTitle.split('|').first.trim();
+                } else if (cleanedTitle.contains('-')) {
+                  name = cleanedTitle.split('-').first.trim();
+                } else if (cleanedTitle.isNotEmpty) {
+                  name = cleanedTitle;
+                }
+              }
+
+              if (name != null && name.isNotEmpty && !name.contains("ログイン")) {
+                await _saveName(id, name);
+
+                // アイコン画像の保存判定
+                if (imageUrl.isNotEmpty) {
+                  bool isLikelyDefaultIcon = imageUrl.contains('assets') || imageUrl.contains('logo') || imageUrl.endsWith('svg');
+                  // プロフィール画像（profilesを含む）なら無条件で信用度高
+                  if (imageUrl.contains('/profiles/')) {
+                      isLikelyDefaultIcon = false;
+                  }
+                  
+                  if (!isLikelyDefaultIcon) {
+                    await _saveIcon(id, imageUrl);
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            debugPrint('JS Error: $e');
+          }
+        },
+      ),
+    );
+
+    try {
+      final url = 'https://8card.net/p/$id';
+      await tempController.loadRequest(Uri.parse(url));
+    } catch (e) {
+      debugPrint('WebView Load Error: $e');
+    }
+  }
+  
   void _showEditNameDialog(String id, String currentName) {
     final TextEditingController _controller = TextEditingController(
       text: currentName,
@@ -211,7 +328,6 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
     );
   }
 
-  // --- 通知ロジック ---
   Future<void> triggerNotification(String id) async {
     final now = DateTime.now();
 
@@ -249,7 +365,6 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
     );
   }
 
-  // --- スキャンロジック ---
   void startScan() async {
     if (Platform.isAndroid) {
       await [
@@ -300,6 +415,7 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
               setState(() {
                 foundIds.add(id);
               });
+              _fetchEightProfile(id);
             }
             triggerNotification(id);
           } catch (e) {
@@ -328,6 +444,11 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final knownIds =
+        foundIds.where((id) => teacherNames.containsKey(id)).toList();
+    final unknownIds =
+        foundIds.where((id) => !teacherNames.containsKey(id)).toList();
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('M5 Badge Tracker'),
@@ -403,10 +524,36 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
             child: foundIds.isEmpty
                 ? const Center(child: Text("スキャン中..."))
                 : ListView.builder(
-                    itemCount: foundIds.length,
+                    itemCount:
+                        knownIds.length + (unknownIds.isNotEmpty ? 1 : 0),
                     itemBuilder: (context, index) {
-                      final id = foundIds.elementAt(index);
-                      final displayName = teacherNames[id] ?? "Guest";
+                      if (index == knownIds.length) {
+                        return Card(
+                          margin: const EdgeInsets.all(16),
+                          color: Colors.grey.shade300,
+                          child: ListTile(
+                            leading: const Icon(Icons.help_outline),
+                            title: const Text("不明なデバイス"),
+                            subtitle: Text("${unknownIds.length} 件の未登録ID"),
+                            trailing: const Icon(Icons.arrow_forward),
+                            onTap: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (context) => UnknownDeviceListPage(
+                                    unknownIds: unknownIds,
+                                    onRegisterName: _saveName,
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                        );
+                      }
+
+                      final id = knownIds[index];
+                      final displayName = teacherNames[id]!;
+                      final iconUrl = userIcons[id];
 
                       return Card(
                         margin: const EdgeInsets.symmetric(
@@ -414,8 +561,13 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
                           vertical: 8,
                         ),
                         child: ListTile(
-                          leading: const CircleAvatar(
-                            child: Icon(Icons.person),
+                          leading: CircleAvatar(
+                            backgroundImage: (iconUrl != null)
+                                ? NetworkImage(iconUrl)
+                                : null,
+                            child: (iconUrl == null)
+                                ? const Icon(Icons.person)
+                                : null,
                           ),
                           title: Text(displayName),
                           subtitle: Text("ID: $id\n長押しで名前を編集"),
@@ -432,7 +584,7 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
                           onLongPress: () {
                             _showEditNameDialog(
                               id,
-                              displayName == "Guest" ? "" : displayName,
+                              displayName,
                             );
                           },
                         ),
@@ -442,6 +594,85 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
           ),
         ],
       ),
+    );
+  }
+}
+
+class UnknownDeviceListPage extends StatelessWidget {
+  final List<String> unknownIds;
+  final Function(String, String) onRegisterName;
+
+  const UnknownDeviceListPage({
+    super.key,
+    required this.unknownIds,
+    required this.onRegisterName,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text("不明なデバイス一覧")),
+      body: ListView.builder(
+        itemCount: unknownIds.length,
+        itemBuilder: (context, index) {
+          final id = unknownIds[index];
+          return Card(
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: ListTile(
+              title: Text("ID: $id"),
+              subtitle: const Text("タップで確認 / 長押しで名前登録"),
+              trailing: IconButton(
+                icon: const Icon(Icons.edit),
+                onPressed: () => _showRegistrationDialog(context, id),
+              ),
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => WebViewPage(userId: id),
+                  ),
+                );
+              },
+              onLongPress: () {
+                _showRegistrationDialog(context, id);
+              },
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  void _showRegistrationDialog(BuildContext context, String id) {
+    final TextEditingController controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: const Text("名前を登録"),
+          content: TextField(
+            controller: controller,
+            decoration: const InputDecoration(labelText: "名前を入力"),
+            autofocus: true,
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("キャンセル"),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                if (controller.text.isNotEmpty) {
+                  onRegisterName(id, controller.text);
+                  Navigator.pop(ctx);
+                  Navigator.pop(context);
+                }
+              },
+              child: const Text("保存"),
+            ),
+          ],
+        );
+      },
     );
   }
 }

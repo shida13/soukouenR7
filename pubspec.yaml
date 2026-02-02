@@ -14,7 +14,7 @@ dependencies:
   # アイコン
   cupertino_icons: ^1.0.8
 
-  # BLE通信 (コードに合わせてバージョンを調整)
+  # BLE通信
   flutter_blue_plus: ^1.32.0
   
   # URLを開く
@@ -26,9 +26,15 @@ dependencies:
   # 通知
   flutter_local_notifications: ^17.0.0
   
-  # 【重要】これが不足していました（権限管理）
+  # 権限管理
   permission_handler: ^11.3.1
+  
+  # データ保存
   shared_preferences: ^2.5.4
+
+  # --- 今回追加するパッケージ (Webスクレイピング用) ---
+  http: ^1.2.0
+  html: ^0.15.4
 
 dev_dependencies:
   flutter_test:
