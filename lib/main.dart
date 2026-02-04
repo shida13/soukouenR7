@@ -103,7 +103,17 @@ class BadgeScannerScreen extends StatefulWidget {
 }
 
 class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
-  final Set<String> foundIds = {};
+  // --- 変数定義 ---
+  // IDとRSSI（電波強度）をセットで保存
+  final Map<String, int> deviceRssi = {}; 
+  
+  // 並び順を固定するための表示用リスト
+  List<String> sortedKnownIds = [];
+  List<String> sortedUnknownIds = [];
+  
+  // 並び替え用タイマー
+  Timer? _sortTimer;
+
   bool isScanning = false;
   StreamSubscription<List<ScanResult>>? scanSubscription;
   final Map<String, DateTime> lastNotificationTimes = {};
@@ -120,6 +130,7 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
 
   @override
   void dispose() {
+    _sortTimer?.cancel();
     scanSubscription?.cancel();
     FlutterBluePlus.stopScan();
     super.dispose();
@@ -130,7 +141,6 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
   }
 
   // --- データ保存・読み込み ---
-
   Future<void> _loadSavedData() async {
     final prefs = await SharedPreferences.getInstance();
     final keys = prefs.getKeys();
@@ -187,7 +197,7 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
     }
   }
 
-// --- 修正: JavaScriptの取得ロジックを提示いただいたHTMLに合わせて変更 ---
+  // --- Eightプロフィールの取得（リトライ機能付き） ---
   Future<void> _fetchEightProfile(String id) async {
     if (teacherNames.containsKey(id)) {
       return;
@@ -199,88 +209,90 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
     tempController.setNavigationDelegate(
       NavigationDelegate(
         onPageFinished: (String url) async {
-          // 描画待ち
-          await Future.delayed(const Duration(seconds: 3));
+          int retryCount = 0;
+          const int maxRetries = 3;
 
-          try {
-            final Object result = await tempController.runJavaScriptReturningResult("""
-              (function() {
-                var title = document.title || "";
-                var imgUrl = "";
-                
-                // 【修正】ご提示いただいた alt="person avatar" を最優先で探す
-                var targetImg = document.querySelector('img[alt="person avatar"]');
-                if (targetImg) {
-                    imgUrl = targetImg.src || "";
-                }
-                
-                // 見つからない場合の予備1: URLに 'profiles' を含む画像を全探索
-                // (クラス名が変わってもURL構造は変わりにくいと推測)
-                if (!imgUrl) {
-                    var imgs = document.getElementsByTagName('img');
-                    for (var i = 0; i < imgs.length; i++) {
-                        if (imgs[i].src && imgs[i].src.includes('/profiles/')) {
-                            imgUrl = imgs[i].src;
-                            break;
-                        }
-                    }
-                }
+          while (retryCount < maxRetries) {
+            await Future.delayed(const Duration(seconds: 2));
 
-                // 見つからない場合の予備2: metaタグ
-                if (!imgUrl) {
-                    var metaImg = document.querySelector('meta[property="og:image"]');
-                    if (metaImg) {
-                        imgUrl = metaImg.content || "";
-                    }
-                }
-
-                return title + "|||" + imgUrl;
-              })();
-            """);
-
-            String resultStr = result.toString();
-            if (resultStr.startsWith('"') && resultStr.endsWith('"')) {
-              resultStr = resultStr.substring(1, resultStr.length - 1);
-            }
-            resultStr = resultStr.replaceAll(r'\"', '"').replaceAll(r'\/', '/');
-
-            final parts = resultStr.split('|||');
-            if (parts.length == 2) {
-              String rawTitle = parts[0];
-              String imageUrl = parts[1];
-              String? name;
-
-              if (rawTitle.isNotEmpty) {
-                String cleanedTitle = rawTitle.replaceAll(RegExp(r'名刺アプリ|Eight|プロフィール|｜'), '').trim();
-                
-                if (cleanedTitle.contains('|')) {
-                  name = cleanedTitle.split('|').first.trim();
-                } else if (cleanedTitle.contains('-')) {
-                  name = cleanedTitle.split('-').first.trim();
-                } else if (cleanedTitle.isNotEmpty) {
-                  name = cleanedTitle;
-                }
-              }
-
-              if (name != null && name.isNotEmpty && !name.contains("ログイン")) {
-                await _saveName(id, name);
-
-                // アイコン画像の保存判定
-                if (imageUrl.isNotEmpty) {
-                  bool isLikelyDefaultIcon = imageUrl.contains('assets') || imageUrl.contains('logo') || imageUrl.endsWith('svg');
-                  // プロフィール画像（profilesを含む）なら無条件で信用度高
-                  if (imageUrl.contains('/profiles/')) {
-                      isLikelyDefaultIcon = false;
+            try {
+              final Object result = await tempController.runJavaScriptReturningResult("""
+                (function() {
+                  var title = document.title || "";
+                  var imgUrl = "";
+                  
+                  // alt="person avatar" を最優先
+                  var targetImg = document.querySelector('img[alt="person avatar"]');
+                  if (targetImg) {
+                      imgUrl = targetImg.src || "";
                   }
                   
-                  if (!isLikelyDefaultIcon) {
-                    await _saveIcon(id, imageUrl);
+                  // 予備1: URLに 'profiles' を含む画像
+                  if (!imgUrl) {
+                      var imgs = document.getElementsByTagName('img');
+                      for (var i = 0; i < imgs.length; i++) {
+                          if (imgs[i].src && imgs[i].src.includes('/profiles/')) {
+                              imgUrl = imgs[i].src;
+                              break;
+                          }
+                      }
+                  }
+
+                  // 予備2: metaタグ
+                  if (!imgUrl) {
+                      var metaImg = document.querySelector('meta[property="og:image"]');
+                      if (metaImg) {
+                          imgUrl = metaImg.content || "";
+                      }
+                  }
+
+                  return title + "|||" + imgUrl;
+                })();
+              """);
+
+              String resultStr = result.toString();
+              if (resultStr.startsWith('"') && resultStr.endsWith('"')) {
+                resultStr = resultStr.substring(1, resultStr.length - 1);
+              }
+              resultStr = resultStr.replaceAll(r'\"', '"').replaceAll(r'\/', '/');
+
+              final parts = resultStr.split('|||');
+              if (parts.length == 2) {
+                String rawTitle = parts[0];
+                String imageUrl = parts[1];
+                String? name;
+
+                if (rawTitle.isNotEmpty) {
+                  String cleanedTitle = rawTitle.replaceAll(RegExp(r'名刺アプリ|Eight|プロフィール|｜'), '').trim();
+                  
+                  if (cleanedTitle.contains('|')) {
+                    name = cleanedTitle.split('|').first.trim();
+                  } else if (cleanedTitle.contains('-')) {
+                    name = cleanedTitle.split('-').first.trim();
+                  } else if (cleanedTitle.isNotEmpty) {
+                    name = cleanedTitle;
                   }
                 }
+
+                if (name != null && name.isNotEmpty && !name.contains("ログイン") && name != "Eight") {
+                  await _saveName(id, name);
+
+                  if (imageUrl.isNotEmpty) {
+                    bool isLikelyDefaultIcon = imageUrl.contains('assets') || imageUrl.contains('logo') || imageUrl.endsWith('svg');
+                    if (imageUrl.contains('/profiles/')) {
+                        isLikelyDefaultIcon = false;
+                    }
+                    if (!isLikelyDefaultIcon) {
+                      await _saveIcon(id, imageUrl);
+                    }
+                  }
+                  return; // 成功したら終了
+                }
               }
+            } catch (e) {
+              debugPrint('JS Error: $e');
             }
-          } catch (e) {
-            debugPrint('JS Error: $e');
+            retryCount++;
           }
         },
       ),
@@ -293,7 +305,7 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
       debugPrint('WebView Load Error: $e');
     }
   }
-  
+
   void _showEditNameDialog(String id, String currentName) {
     final TextEditingController _controller = TextEditingController(
       text: currentName,
@@ -328,6 +340,7 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
     );
   }
 
+  // --- 通知機能 ---
   Future<void> triggerNotification(String id) async {
     final now = DateTime.now();
 
@@ -365,6 +378,33 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
     );
   }
 
+  // --- リストの並び替えロジック ---
+  void _updateListOrder() {
+    if (!mounted) return;
+
+    setState(() {
+      // 既知のIDリストを作成
+      final known = deviceRssi.keys
+          .where((id) => teacherNames.containsKey(id))
+          .toList();
+
+      // RSSIでソート（大きい順＝近い順 ※-40 > -90）
+      known.sort((a, b) {
+        int rssiA = deviceRssi[a] ?? -100;
+        int rssiB = deviceRssi[b] ?? -100;
+        return rssiB.compareTo(rssiA); 
+      });
+
+      sortedKnownIds = known;
+
+      // 未知のIDリストを作成
+      sortedUnknownIds = deviceRssi.keys
+          .where((id) => !teacherNames.containsKey(id))
+          .toList();
+    });
+  }
+
+  // --- スキャン制御 ---
   void startScan() async {
     if (Platform.isAndroid) {
       await [
@@ -397,8 +437,17 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
     }
 
     setState(() {
-      foundIds.clear();
+      deviceRssi.clear();
+      sortedKnownIds.clear();
+      sortedUnknownIds.clear();
       isScanning = true;
+    });
+
+    // 3秒ごとに並び替えを行うタイマーを開始
+    _updateListOrder();
+    _sortTimer?.cancel();
+    _sortTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
+      _updateListOrder();
     });
 
     final targetUuid = Guid("0000feff-0000-1000-8000-00805f9b34fb");
@@ -411,12 +460,16 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
         if (serviceData.containsKey(targetUuid)) {
           try {
             String id = utf8.decode(serviceData[targetUuid]!);
-            if (!foundIds.contains(id)) {
-              setState(() {
-                foundIds.add(id);
-              });
-              _fetchEightProfile(id);
-            }
+            
+            setState(() {
+              // 初めて見つけた場合のみWeb取得処理を呼ぶ
+              if (!deviceRssi.containsKey(id)) {
+                 _fetchEightProfile(id);
+              }
+              // RSSIは常に最新値で更新
+              deviceRssi[id] = r.rssi;
+            });
+
             triggerNotification(id);
           } catch (e) {
             debugPrint("データ解析エラー: $e");
@@ -437,6 +490,7 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
 
   void stopScan() {
     FlutterBluePlus.stopScan();
+    _sortTimer?.cancel();
     setState(() {
       isScanning = false;
     });
@@ -444,11 +498,6 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final knownIds =
-        foundIds.where((id) => teacherNames.containsKey(id)).toList();
-    final unknownIds =
-        foundIds.where((id) => !teacherNames.containsKey(id)).toList();
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('M5 Badge Tracker'),
@@ -521,27 +570,29 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
           ),
           const Divider(),
           Expanded(
-            child: foundIds.isEmpty
+            child: deviceRssi.isEmpty
                 ? const Center(child: Text("スキャン中..."))
                 : ListView.builder(
                     itemCount:
-                        knownIds.length + (unknownIds.isNotEmpty ? 1 : 0),
+                        sortedKnownIds.length + (sortedUnknownIds.isNotEmpty ? 1 : 0),
                     itemBuilder: (context, index) {
-                      if (index == knownIds.length) {
+                      
+                      // 不明なデバイスグループ
+                      if (index == sortedKnownIds.length) {
                         return Card(
                           margin: const EdgeInsets.all(16),
                           color: Colors.grey.shade300,
                           child: ListTile(
                             leading: const Icon(Icons.help_outline),
                             title: const Text("不明なデバイス"),
-                            subtitle: Text("${unknownIds.length} 件の未登録ID"),
+                            subtitle: Text("${sortedUnknownIds.length} 件の未登録ID"),
                             trailing: const Icon(Icons.arrow_forward),
                             onTap: () {
                               Navigator.push(
                                 context,
                                 MaterialPageRoute(
                                   builder: (context) => UnknownDeviceListPage(
-                                    unknownIds: unknownIds,
+                                    unknownIds: sortedUnknownIds,
                                     onRegisterName: _saveName,
                                   ),
                                 ),
@@ -551,9 +602,13 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
                         );
                       }
 
-                      final id = knownIds[index];
+                      // 既知のデバイス
+                      final id = sortedKnownIds[index];
                       final displayName = teacherNames[id]!;
                       final iconUrl = userIcons[id];
+                      
+                      // RSSIを絶対値（正の値）で表示
+                      final rssi = deviceRssi[id]?.abs() ?? 0;
 
                       return Card(
                         margin: const EdgeInsets.symmetric(
@@ -570,7 +625,7 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
                                 : null,
                           ),
                           title: Text(displayName),
-                          subtitle: Text("ID: $id\n長押しで名前を編集"),
+                          subtitle: Text("ID: $id\n距離目安: $rssi"),
                           isThreeLine: true,
                           trailing: const Icon(Icons.chevron_right),
                           onTap: () {
