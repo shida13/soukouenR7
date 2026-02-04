@@ -114,6 +114,9 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
   // 並び替え用タイマー
   Timer? _sortTimer;
 
+  // ★【重要】処理中のWebViewControllerを保持して、勝手に消されないようにするリスト
+  final Set<WebViewController> _activeControllers = {};
+
   bool isScanning = false;
   StreamSubscription<List<ScanResult>>? scanSubscription;
   final Map<String, DateTime> lastNotificationTimes = {};
@@ -133,6 +136,9 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
     _sortTimer?.cancel();
     scanSubscription?.cancel();
     FlutterBluePlus.stopScan();
+    
+    // ★終了時に残っているコントローラーを破棄
+    _activeControllers.clear();
     super.dispose();
   }
 
@@ -197,13 +203,18 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
     }
   }
 
-  // --- Eightプロフィールの取得（リトライ機能付き） ---
+  // --- Eightプロフィールの取得（修正版：Controller保護＋リトライ） ---
   Future<void> _fetchEightProfile(String id) async {
+    // 既に名前を知っている場合は何もしない
     if (teacherNames.containsKey(id)) {
       return;
     }
 
     final tempController = WebViewController();
+    
+    // ★【重要】作成したコントローラーをリストに追加して保護する
+    _activeControllers.add(tempController);
+
     tempController.setJavaScriptMode(JavaScriptMode.unrestricted);
 
     tempController.setNavigationDelegate(
@@ -211,8 +222,10 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
         onPageFinished: (String url) async {
           int retryCount = 0;
           const int maxRetries = 3;
+          bool isSuccess = false;
 
           while (retryCount < maxRetries) {
+            // 描画待ち
             await Future.delayed(const Duration(seconds: 2));
 
             try {
@@ -221,13 +234,13 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
                   var title = document.title || "";
                   var imgUrl = "";
                   
-                  // alt="person avatar" を最優先
+                  // 1. alt="person avatar" を最優先で探す
                   var targetImg = document.querySelector('img[alt="person avatar"]');
                   if (targetImg) {
                       imgUrl = targetImg.src || "";
                   }
                   
-                  // 予備1: URLに 'profiles' を含む画像
+                  // 2. 見つからない場合、URLに 'profiles' を含む画像を探す
                   if (!imgUrl) {
                       var imgs = document.getElementsByTagName('img');
                       for (var i = 0; i < imgs.length; i++) {
@@ -238,7 +251,7 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
                       }
                   }
 
-                  // 予備2: metaタグ
+                  // 3. それでも見つからない場合、og:imageを探す
                   if (!imgUrl) {
                       var metaImg = document.querySelector('meta[property="og:image"]');
                       if (metaImg) {
@@ -262,6 +275,7 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
                 String imageUrl = parts[1];
                 String? name;
 
+                // タイトルのクリーニング
                 if (rawTitle.isNotEmpty) {
                   String cleanedTitle = rawTitle.replaceAll(RegExp(r'名刺アプリ|Eight|プロフィール|｜'), '').trim();
                   
@@ -274,11 +288,14 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
                   }
                 }
 
+                // 有効な名前かチェック
                 if (name != null && name.isNotEmpty && !name.contains("ログイン") && name != "Eight") {
                   await _saveName(id, name);
 
+                  // 画像の保存判定
                   if (imageUrl.isNotEmpty) {
                     bool isLikelyDefaultIcon = imageUrl.contains('assets') || imageUrl.contains('logo') || imageUrl.endsWith('svg');
+                    // URLにprofilesが含まれていれば、ロゴっぽくても信じる
                     if (imageUrl.contains('/profiles/')) {
                         isLikelyDefaultIcon = false;
                     }
@@ -286,14 +303,20 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
                       await _saveIcon(id, imageUrl);
                     }
                   }
-                  return; // 成功したら終了
+                  
+                  isSuccess = true;
+                  break; // 成功したのでループを抜ける
                 }
               }
             } catch (e) {
               debugPrint('JS Error: $e');
             }
             retryCount++;
+            debugPrint("Retry $retryCount for $id");
           }
+
+          // ★【重要】処理が終わったら保護リストから外す
+          _activeControllers.remove(tempController);
         },
       ),
     );
@@ -303,6 +326,8 @@ class _BadgeScannerScreenState extends State<BadgeScannerScreen> {
       await tempController.loadRequest(Uri.parse(url));
     } catch (e) {
       debugPrint('WebView Load Error: $e');
+      // エラー時も保護リストから外す
+      _activeControllers.remove(tempController);
     }
   }
 
